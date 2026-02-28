@@ -5,11 +5,26 @@ import { useMedicationStore } from '../stores/medicationStore'
 import { useSymptomStore } from '../stores/symptomStore'
 import { generateInsights } from '../utils/mockAI'
 import { exportHealthSummary } from '../utils/pdfExport'
-import { format } from 'date-fns'
+import { format, subDays, subMonths, subYears } from 'date-fns'
 import {
   FileDown, FileText, Pill, HeartPulse, TrendingUp,
   AlertTriangle, CheckCircle, Info, Lightbulb,
+  Calendar, Clock,
 } from 'lucide-react'
+
+const PRESETS = [
+  { label: 'Last 30 days', days: 30 },
+  { label: 'Last 90 days', days: 90 },
+  { label: 'Last 6 months', days: 182 },
+  { label: 'Last year', days: 365 },
+  { label: 'All time', days: null },
+]
+
+function inRange(dateStr, startDate, endDate) {
+  if (!dateStr) return false
+  const d = new Date(dateStr)
+  return d >= new Date(startDate + 'T00:00:00') && d <= new Date(endDate + 'T23:59:59')
+}
 
 export default function Export() {
   const { user } = useAuthStore()
@@ -18,26 +33,157 @@ export default function Export() {
   const symptomStore = useSymptomStore()
   const [exported, setExported] = useState(false)
 
+  const today = new Date().toISOString().split('T')[0]
+  const [startDate, setStartDate] = useState(subMonths(new Date(), 6).toISOString().split('T')[0])
+  const [endDate, setEndDate] = useState(today)
+  const [activePreset, setActivePreset] = useState('Last 6 months')
+
+  const applyPreset = (preset) => {
+    setActivePreset(preset.label)
+    setEndDate(today)
+    if (preset.days === null) {
+      setStartDate('2000-01-01')
+    } else {
+      setStartDate(subDays(new Date(), preset.days).toISOString().split('T')[0])
+    }
+  }
+
+  const handleCustomDate = (field, value) => {
+    setActivePreset(null)
+    if (field === 'start') setStartDate(value)
+    else setEndDate(value)
+  }
+
   const userId = user?.id
-  const reports = useMemo(() => labStore.getReportsForUser(userId), [userId])
-  const medications = useMemo(() => medStore.getMedicationsForUser(userId).filter(m => m.active !== false), [userId])
-  const symptoms = useMemo(() => symptomStore.getEntriesForUser(userId), [userId])
-  const insights = useMemo(() => generateInsights(reports, symptoms), [reports, symptoms])
+  const allReports = useMemo(() => labStore.getReportsForUser(userId), [userId])
+  const allMedications = useMemo(() => medStore.getMedicationsForUser(userId).filter(m => m.active !== false), [userId])
+  const allSymptoms = useMemo(() => symptomStore.getEntriesForUser(userId), [userId])
+
+  const filteredReports = useMemo(() =>
+    allReports.filter(r => inRange(r.testDate || r.createdAt, startDate, endDate)),
+    [allReports, startDate, endDate]
+  )
+  const filteredSymptoms = useMemo(() =>
+    allSymptoms.filter(s => inRange(s.date || s.createdAt, startDate, endDate)),
+    [allSymptoms, startDate, endDate]
+  )
+  const insights = useMemo(() => generateInsights(filteredReports, filteredSymptoms), [filteredReports, filteredSymptoms])
 
   const handleExport = () => {
-    exportHealthSummary({ user, reports, medications, symptoms, insights })
+    exportHealthSummary({
+      user,
+      reports: filteredReports,
+      medications: allMedications,
+      symptoms: filteredSymptoms,
+      insights,
+      dateRange: { startDate, endDate },
+    })
     setExported(true)
     setTimeout(() => setExported(false), 3000)
   }
 
   const warningCount = insights.filter(i => i.type === 'warning').length
-  const latestReport = reports[0]
+  const latestReport = filteredReports[0]
+  const abnormalCount = latestReport?.results?.filter(r => r.status !== 'normal').length || 0
+
+  const rangeLabel = activePreset === 'All time'
+    ? 'All Time'
+    : `${format(new Date(startDate), 'MMM d, yyyy')} – ${format(new Date(endDate), 'MMM d, yyyy')}`
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl md:text-3xl font-bold text-text-primary">Health Summary & Export</h1>
-        <p className="text-text-secondary mt-1">Review your AI-generated health insights and export a PDF for your doctor</p>
+        <p className="text-text-secondary mt-1">Select a time frame, review AI insights, and export a PDF for your doctor</p>
+      </div>
+
+      <div className="bg-white rounded-xl border border-border p-6">
+        <h2 className="text-lg font-bold text-text-primary flex items-center gap-2 mb-4">
+          <Calendar className="w-5 h-5 text-primary" />
+          Report Time Frame
+        </h2>
+
+        <div className="flex flex-wrap gap-2 mb-4">
+          {PRESETS.map(p => (
+            <button
+              key={p.label}
+              onClick={() => applyPreset(p)}
+              className={`px-4 py-2 rounded-xl text-sm font-semibold transition-colors border
+                ${activePreset === p.label
+                  ? 'bg-primary text-white border-primary'
+                  : 'bg-surface-alt text-text-secondary border-border hover:border-primary/40'
+                }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex flex-col sm:flex-row items-start sm:items-end gap-4">
+          <div className="flex-1 min-w-0">
+            <label className="block text-sm font-semibold text-text-secondary mb-1">From</label>
+            <input
+              type="date"
+              value={startDate}
+              max={endDate}
+              onChange={e => handleCustomDate('start', e.target.value)}
+              className="w-full px-4 py-2.5 border-2 border-border rounded-xl focus:border-primary focus:outline-none"
+            />
+          </div>
+          <div className="flex-1 min-w-0">
+            <label className="block text-sm font-semibold text-text-secondary mb-1">To</label>
+            <input
+              type="date"
+              value={endDate}
+              min={startDate}
+              max={today}
+              onChange={e => handleCustomDate('end', e.target.value)}
+              className="w-full px-4 py-2.5 border-2 border-border rounded-xl focus:border-primary focus:outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="mt-4 flex items-center gap-2 text-sm text-text-secondary bg-surface-alt rounded-lg px-4 py-2.5">
+          <Clock className="w-4 h-4 shrink-0" />
+          <span>
+            Showing <strong className="text-text-primary">{rangeLabel}</strong>
+            {' — '}
+            {filteredReports.length} report{filteredReports.length !== 1 ? 's' : ''},
+            {' '}{filteredSymptoms.length} symptom log{filteredSymptoms.length !== 1 ? 's' : ''},
+            {' '}{allMedications.length} active medication{allMedications.length !== 1 ? 's' : ''}
+          </span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white rounded-xl border border-border p-4 flex items-center gap-3">
+          <FileText className="w-8 h-8 text-primary" />
+          <div>
+            <p className="text-2xl font-bold text-text-primary">{filteredReports.length}</p>
+            <p className="text-sm text-text-secondary">Lab Reports</p>
+          </div>
+        </div>
+        <div className="bg-white rounded-xl border border-border p-4 flex items-center gap-3">
+          <Pill className="w-8 h-8 text-accent" />
+          <div>
+            <p className="text-2xl font-bold text-text-primary">{allMedications.length}</p>
+            <p className="text-sm text-text-secondary">Active Medications</p>
+          </div>
+        </div>
+        <div className="bg-white rounded-xl border border-border p-4 flex items-center gap-3">
+          <HeartPulse className="w-8 h-8 text-warning" />
+          <div>
+            <p className="text-2xl font-bold text-text-primary">{filteredSymptoms.length}</p>
+            <p className="text-sm text-text-secondary">Symptom Entries</p>
+          </div>
+        </div>
+        <div className="bg-white rounded-xl border border-border p-4 flex items-center gap-3">
+          <TrendingUp className="w-8 h-8 text-danger" />
+          <div>
+            <p className="text-2xl font-bold text-text-primary">{abnormalCount}</p>
+            <p className="text-sm text-text-secondary">Flagged Values</p>
+          </div>
+        </div>
       </div>
 
       <div className="bg-white rounded-xl border border-border p-6">
@@ -47,7 +193,7 @@ export default function Export() {
               <Lightbulb className="w-5 h-5 text-warning" />
               AI Health Insights
             </h2>
-            <p className="text-sm text-text-secondary mt-1">Based on your lab results and symptom patterns</p>
+            <p className="text-sm text-text-secondary mt-1">Based on lab results and symptoms in the selected period</p>
           </div>
           {warningCount > 0 && (
             <span className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-warning/10 text-warning text-sm font-bold">
@@ -86,37 +232,6 @@ export default function Export() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white rounded-xl border border-border p-4 flex items-center gap-3">
-          <FileText className="w-8 h-8 text-primary" />
-          <div>
-            <p className="text-2xl font-bold text-text-primary">{reports.length}</p>
-            <p className="text-sm text-text-secondary">Lab Reports</p>
-          </div>
-        </div>
-        <div className="bg-white rounded-xl border border-border p-4 flex items-center gap-3">
-          <Pill className="w-8 h-8 text-accent" />
-          <div>
-            <p className="text-2xl font-bold text-text-primary">{medications.length}</p>
-            <p className="text-sm text-text-secondary">Active Medications</p>
-          </div>
-        </div>
-        <div className="bg-white rounded-xl border border-border p-4 flex items-center gap-3">
-          <HeartPulse className="w-8 h-8 text-warning" />
-          <div>
-            <p className="text-2xl font-bold text-text-primary">{symptoms.length}</p>
-            <p className="text-sm text-text-secondary">Symptom Entries</p>
-          </div>
-        </div>
-        <div className="bg-white rounded-xl border border-border p-4 flex items-center gap-3">
-          <TrendingUp className="w-8 h-8 text-danger" />
-          <div>
-            <p className="text-2xl font-bold text-text-primary">{latestReport?.results?.filter(r => r.status !== 'normal').length || 0}</p>
-            <p className="text-sm text-text-secondary">Flagged Values</p>
-          </div>
-        </div>
-      </div>
-
       {latestReport && (
         <div className="bg-white rounded-xl border border-border p-6">
           <h2 className="text-lg font-bold text-text-primary mb-3">
@@ -150,22 +265,25 @@ export default function Export() {
       )}
 
       <div className="bg-gradient-to-r from-primary to-primary-light rounded-xl p-6 text-white">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div>
             <h2 className="text-xl font-bold flex items-center gap-2">
               <FileDown className="w-6 h-6" />
               Export PDF Report
             </h2>
             <p className="text-white/80 mt-1">
-              Download a comprehensive health summary to share with your doctor.
-              Includes lab results, medications, symptoms, and AI insights.
+              Download a health report for <strong>{rangeLabel}</strong>.
+              Includes {filteredReports.length} lab report{filteredReports.length !== 1 ? 's' : ''},
+              {' '}{allMedications.length} medication{allMedications.length !== 1 ? 's' : ''},
+              {' '}{filteredSymptoms.length} symptom log{filteredSymptoms.length !== 1 ? 's' : ''},
+              and AI insights.
             </p>
           </div>
           <button
             onClick={handleExport}
-            disabled={reports.length === 0}
+            disabled={filteredReports.length === 0 && filteredSymptoms.length === 0}
             className={`px-6 py-3 rounded-xl font-bold text-lg transition-colors shrink-0
-              ${reports.length === 0
+              ${filteredReports.length === 0 && filteredSymptoms.length === 0
                 ? 'bg-white/20 cursor-not-allowed'
                 : exported
                   ? 'bg-accent text-white'
